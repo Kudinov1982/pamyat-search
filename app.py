@@ -1,3 +1,5 @@
+import subprocess
+subprocess.run(["playwright", "install", "chromium"], check=True)
 import asyncio
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
