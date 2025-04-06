@@ -1,161 +1,149 @@
-import os
 import asyncio
-from flask import Flask, request, Response, stream_with_context, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import json
-import re
-from threading import Lock
-from collections import Counter
+import urllib.parse
 
+# === Установка браузеров при старте ===
+async def install_playwright_browsers():
+    async with async_playwright() as p:
+        print("✅ Браузеры Playwright установлены и готовы!")
+
+asyncio.run(install_playwright_browsers())
+
+# === Flask-приложение ===
 app = Flask(__name__)
-CORS(app, origins=["https://metrics.tilda.ws"])  # Разрешаем только твой сайт
+CORS(app)
 
-search_lock = Lock()
-stop_flag = False
+# === Глобальные переменные ===
+searching = False
+chart_data = {
+    "surname": {
+        "regions": {},
+        "districts": {},
+        "settlements": {}
+    },
+    "birthplace": {
+        "surnames": {}
+    }
+}
 
-top_regions = Counter()
-top_districts = Counter()
-top_settlements = Counter()
-top_surnames = Counter()
+# === Функция очистки мусора ===
+def clean_text(text):
+    garbage_phrases = [
+        "Донесение о потерях", "Книга Памяти", "Данные об утрате документов", 
+        "Донесение о безвозвратных потерях", "данные ОБД", "данные картотеки", 
+        "Юбилейная картотека", "Донесения о потерях", "Картотека потерь", 
+        "Печатная Книга Памяти", "Уточнение потерь", "Картотека захоронений"
+    ]
+    for phrase in garbage_phrases:
+        if phrase.lower() in text.lower():
+            return ''
+    return text
 
-invalid_birthplace_patterns = [
-    r'^красноармеец', r'^сержант', r'^курсант', r'^б/зв', r'^ефрейтор', r'^рядовой', r'^старшина',
-    r'^мл\.?\sсержант', r'^ст\.?\sсержант', r'^старший\sлейтенант', r'^лейтенант', r'^капитан', r'^подполковник',
-    r'\. ВПП', r'\. ЗП', r'\. Картотека', r'\. Призыв', r'\. Демобилизация', r'\. УПК',
-    r'\. Юбилейная картотека', r'\. Пленение', r'\. Картотека ранений',
-    r'^\.\s', r'^-\d{2}-\d{2}'
-]
+# === Генерация ссылок для поиска ===
+def build_search_url(surname, place_birth, page, mode):
+    base = "https://pamyat-naroda.ru/heroes/"
+    params = {
+        "group": "all",
+        "types": ":".join([
+            "pamyat_commander", "nagrady_nagrad_doc", "nagrady_uchet_kartoteka",
+            "nagrady_ubilein_kartoteka", "pdv_kart_in", "pdv_kart_in_inostranec",
+            "pamyat_voenkomat", "potery_vpp", "pamyat_zsp_parts", "kld_ran",
+            "kld_bolezn", "kld_card", "kld_upk", "kld_vmf", "kld_partizan",
+            "potery_doneseniya_o_poteryah", "potery_gospitali", "potery_utochenie_poter",
+            "potery_spiski_zahoroneniy", "potery_voennoplen", "potery_iskluchenie_iz_spiskov",
+            "potery_kartoteki", "potery_rvk_extra", "potery_isp_extra", 
+            "same_doroga", "same_rvk", "same_guk", "potery_knigi_pamyati"
+        ]),
+        "page": page,
+        "grouppersons": "1"
+    }
+    if mode == "surname":
+        params["last_name"] = surname
+        if place_birth:
+            params["place_birth"] = place_birth
+    elif mode == "birthplace":
+        params["place_birth"] = place_birth
+    return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
-def is_valid_birthplace(place):
-    place = place.lower().strip()
-    for pattern in invalid_birthplace_patterns:
-        if re.search(pattern, place):
-            return False
-    return True
-
-def parse_birthplace(place):
-    region, district, settlement = None, None, None
-    parts = [p.strip() for p in place.split(',')]
-    for part in parts:
-        if any(word in part for word in ['обл', 'край', 'АССР']):
-            region = part
-        elif any(word in part for word in ['р-н', 'г.']):
-            district = part
-        elif any(word in part for word in ['с.', 'д.', 'с/с', 'с/з']):
-            settlement = part
-    return region, district, settlement
-
-def update_counters(hero, mode):
-    if mode == 'surname':
-        region, district, settlement = parse_birthplace(hero["место рождения"])
-        if region:
-            top_regions[region] += 1
-        if district:
-            top_districts[district] += 1
-        if settlement:
-            top_settlements[settlement] += 1
-    elif mode == 'birthplace':
-        surname = hero["фамилия"]
-        if surname:
-            top_surnames[surname] += 1
-
+# === Основная функция парсинга ===
 async def fetch_heroes(surname, place_birth, max_pages, mode):
-    global stop_flag
+    global searching
+    searching = True
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
+        page = await browser.new_page()
 
-        page_num = 1
-        empty_records = 0
-
-        while page_num <= max_pages and empty_records < 20:
-            if stop_flag:
+        no_result_count = 0
+        for current_page in range(1, max_pages + 1):
+            if not searching:
                 break
 
-            if mode == 'surname':
-                search_url = f"https://pamyat-naroda.ru/heroes/?last_name={surname}&page={page_num}&grouppersons=1"
-                if place_birth:
-                    search_url += f"&place_birth={place_birth}"
-            else:
-                search_url = f"https://pamyat-naroda.ru/heroes/?page={page_num}&grouppersons=1&place_birth={place_birth}"
-
-            await page.goto(search_url)
-            await page.wait_for_timeout(1000)
+            url = build_search_url(surname, place_birth, current_page, mode)
+            await page.goto(url)
+            await asyncio.sleep(1)
 
             content = await page.content()
-            soup = BeautifulSoup(content, 'html.parser')
-            items = soup.select('.heroes-list-item')
-
-            if not items:
-                empty_records += 1
-                page_num += 1
+            soup = BeautifulSoup(content, "html.parser")
+            records = soup.select('.card-person')
+            
+            if not records:
+                no_result_count += 1
+                if no_result_count >= 20:
+                    break
                 continue
 
-            matched = False
+            no_result_count = 0
 
-            for item in items:
-                if stop_flag:
-                    break
+            for record in records:
+                try:
+                    fullname = record.select_one(".card-person-title__name").text.strip().split()
+                    last_name, first_name, middle_name = (fullname + ["", ""])[:3]
+                    birth_year = record.select_one(".card-person-info__item--year .card-person-info__value")
+                    birth_year = birth_year.text.strip() if birth_year else ""
 
-                name_elem = item.select_one('.heroes-list-item-name')
-                info_elem = item.select_one('.heroes-list-item-info')
+                    place = record.select_one(".card-person-info__item--birthPlace .card-person-info__value")
+                    place = place.text.strip() if place else ""
+                    place = clean_text(place)
 
-                if name_elem and info_elem:
-                    name_text = name_elem.text.strip()
-                    info_text = info_elem.text.strip()
+                    link = record.select_one(".card-person-title__name a")
+                    url = "https://pamyat-naroda.ru" + link['href'] if link else ""
 
-                    name_parts = name_text.split()
-                    if len(name_parts) == 0:
-                        continue
+                    if mode == "surname":
+                        if place_birth and place_birth.lower() not in place.lower():
+                            continue
+                        region, district, settlement = (place.split(",") + ["", ""])[:3]
+                        chart_data["surname"]["regions"][region.strip()] = chart_data["surname"]["regions"].get(region.strip(), 0) + 1
+                        chart_data["surname"]["districts"][district.strip()] = chart_data["surname"]["districts"].get(district.strip(), 0) + 1
+                        chart_data["surname"]["settlements"][settlement.strip()] = chart_data["surname"]["settlements"].get(settlement.strip(), 0) + 1
+                    elif mode == "birthplace":
+                        chart_data["birthplace"]["surnames"][last_name.strip()] = chart_data["birthplace"]["surnames"].get(last_name.strip(), 0) + 1
 
-                    year_match = re.search(r'(\d{4})', info_text)
-                    year = year_match.group(1) if year_match else ""
-
-                    place = info_text
-                    if year:
-                        place = place.split(year, 1)[-1]
-                        place = place.strip(' ,')
-
-                    if "Место службы" in place:
-                        place = place.split("Место службы")[0].strip(' ,')
-
-                    if not place or len(place) < 3 or not is_valid_birthplace(place):
-                        continue
-
-                    hero = {
-                        "фамилия": name_parts[0],
-                        "имя": name_parts[1] if len(name_parts) > 1 else "",
-                        "отчество": name_parts[2] if len(name_parts) > 2 else "",
-                        "год рождения": year,
+                    yield {
+                        "фамилия": last_name,
+                        "имя": first_name,
+                        "отчество": middle_name,
+                        "год рождения": birth_year,
                         "место рождения": place,
-                        "url": name_elem.get('href') if name_elem.get('href', '').startswith('http') else "https://pamyat-naroda.ru" + name_elem.get('href')
+                        "url": url
                     }
+                except Exception:
+                    continue
 
-                    update_counters(hero, mode)
-                    yield hero
-                    matched = True
-
-            if not matched:
-                empty_records += 1
-            else:
-                empty_records = 0
-
-            yield f"event: page\ndata: {page_num}\n\n"
-            page_num += 1
+            yield f"page"
 
         await browser.close()
+    searching = False
 
+# === Асинхронный генератор результатов ===
 async def async_gen_rows(surname, place_birth, max_pages, mode):
     async for hero in fetch_heroes(surname, place_birth, max_pages, mode):
-        if isinstance(hero, dict):
-            yield f"data: {json.dumps(hero, ensure_ascii=False)}\n\n"
-        else:
-            yield hero
-    yield "data: [END]\n\n"
+        yield hero
 
+# === Генератор Flask для отправки событий ===
 def generate_rows(surname, place_birth, max_pages, mode):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -166,72 +154,50 @@ def generate_rows(surname, place_birth, max_pages, mode):
             yield row
 
     gen = iterate_gen()
-    try:
-        while True:
+
+    while True:
+        try:
             row = loop.run_until_complete(gen.__anext__())
-            yield row
-    except StopAsyncIteration:
-        pass
-    finally:
-        loop.close()
+            if row == "page":
+                yield 'event: page\ndata: page\n\n'
+            else:
+                yield f"data: {json.dumps(row, ensure_ascii=False)}\n\n"
+        except StopAsyncIteration:
+            yield "data: [END]\n\n"
+            break
+
+# === Маршруты Flask ===
 
 @app.route('/stream')
 def stream():
-    global stop_flag, top_regions, top_districts, top_settlements, top_surnames
-    stop_flag = False
-    top_regions.clear()
-    top_districts.clear()
-    top_settlements.clear()
-    top_surnames.clear()
-
-    surname = request.args.get('surname', '')
-    place_birth = request.args.get('place_birth', '')
-    max_pages = int(request.args.get('max_pages', 50))
+    surname = request.args.get('surname', '').strip()
+    place_birth = request.args.get('place_birth', '').strip()
+    max_pages = int(request.args.get('max_pages', '50'))
     mode = request.args.get('mode', 'surname')
-
-    if not surname and not place_birth:
-        return "Missing parameters", 400
-
-    if not search_lock.acquire(blocking=False):
-        return "Search already in progress", 429
-
-    def release_lock_after_search():
-        try:
-            yield from generate_rows(surname, place_birth, max_pages, mode)
-        finally:
-            search_lock.release()
-
-    return Response(stream_with_context(release_lock_after_search()), mimetype='text/event-stream')
-
-@app.route('/stop', methods=['POST'])
-def stop_search():
-    global stop_flag
-    stop_flag = True
-    return "OK"
+    return Response(generate_rows(surname, place_birth, max_pages, mode), mimetype='text/event-stream')
 
 @app.route('/chart')
-def get_chart_data():
+def chart():
     mode = request.args.get('mode', 'surname')
-    chart_type = request.args.get('type', '')
-
-    if mode == 'surname':
-        if chart_type == 'regions':
-            counter = top_regions
-        elif chart_type == 'districts':
-            counter = top_districts
-        elif chart_type == 'settlements':
-            counter = top_settlements
-        else:
-            return jsonify({'labels': [], 'data': []})
-    elif mode == 'birthplace':
-        counter = top_surnames
+    if mode == "surname":
+        chart_type = request.args.get('type')
+        data = chart_data["surname"].get(chart_type, {})
     else:
-        return jsonify({'labels': [], 'data': []})
+        data = chart_data["birthplace"]["surnames"]
+    sorted_items = sorted(data.items(), key=lambda x: x[1], reverse=True)[:10]
+    labels, counts = zip(*sorted_items) if sorted_items else ([], [])
+    return jsonify({"labels": labels, "data": counts})
 
-    top_items = counter.most_common(10)
-    labels, data = zip(*top_items) if top_items else ([], [])
-    return jsonify({'labels': labels, 'data': data})
+@app.route('/stop', methods=['POST'])
+def stop():
+    global searching
+    searching = False
+    return '', 204
 
+@app.route('/')
+def home():
+    return 'OK'
+
+# === Запуск через gunicorn ===
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=10000)
