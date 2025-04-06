@@ -2,3 +2,4 @@ flask
 flask-cors
 playwright
 bs4
+gunicorn
