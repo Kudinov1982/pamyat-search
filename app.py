@@ -1,5 +1,3 @@
-import subprocess
-subprocess.run(["playwright", "install", "chromium"], check=True)
 import asyncio
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -7,13 +5,6 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import json
 import urllib.parse
-
-# === Установка браузеров при старте ===
-async def install_playwright_browsers():
-    async with async_playwright() as p:
-        print("✅ Браузеры Playwright установлены и готовы!")
-
-asyncio.run(install_playwright_browsers())
 
 # === Flask-приложение ===
 app = Flask(__name__)
@@ -77,17 +68,16 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
     searching = True
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-    headless=True,
-    args=[
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-zygote",
-        "--single-process"
-    ]
-)
-
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-zygote",
+                "--single-process"
+            ]
+        )
         page = await browser.new_page()
 
         no_result_count = 0
@@ -211,6 +201,6 @@ def stop():
 def home():
     return 'OK'
 
-# === Запуск через gunicorn ===
+# === Локальный запуск ===
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=10000)
