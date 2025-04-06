@@ -76,7 +76,18 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
     global searching
     searching = True
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+    headless=True,
+    args=[
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+        "--single-process"
+    ]
+)
+
         page = await browser.new_page()
 
         no_result_count = 0
