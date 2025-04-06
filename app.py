@@ -1,7 +1,3 @@
-# Установка браузеров Playwright при старте приложения
-import subprocess
-subprocess.run(["playwright", "install", "chromium"], check=True)
-
 import asyncio
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -27,12 +23,12 @@ chart_data = {
     }
 }
 
-# === Очистка мусорных фраз ===
+# === Функция очистки мусора ===
 def clean_text(text):
     garbage_phrases = [
-        "Донесение о потерях", "Книга Памяти", "Данные об утрате документов",
-        "Донесение о безвозвратных потерях", "данные ОБД", "данные картотеки",
-        "Юбилейная картотека", "Донесения о потерях", "Картотека потерь",
+        "Донесение о потерях", "Книга Памяти", "Данные об утрате документов", 
+        "Донесение о безвозвратных потерях", "данные ОБД", "данные картотеки", 
+        "Юбилейная картотека", "Донесения о потерях", "Картотека потерь", 
         "Печатная Книга Памяти", "Уточнение потерь", "Картотека захоронений"
     ]
     for phrase in garbage_phrases:
@@ -40,7 +36,7 @@ def clean_text(text):
             return ''
     return text
 
-# === Генерация URL для поиска ===
+# === Генерация ссылок для поиска ===
 def build_search_url(surname, place_birth, page, mode):
     base = "https://pamyat-naroda.ru/heroes/"
     params = {
@@ -52,7 +48,7 @@ def build_search_url(surname, place_birth, page, mode):
             "kld_bolezn", "kld_card", "kld_upk", "kld_vmf", "kld_partizan",
             "potery_doneseniya_o_poteryah", "potery_gospitali", "potery_utochenie_poter",
             "potery_spiski_zahoroneniy", "potery_voennoplen", "potery_iskluchenie_iz_spiskov",
-            "potery_kartoteki", "potery_rvk_extra", "potery_isp_extra",
+            "potery_kartoteki", "potery_rvk_extra", "potery_isp_extra", 
             "same_doroga", "same_rvk", "same_guk", "potery_knigi_pamyati"
         ]),
         "page": page,
@@ -66,7 +62,7 @@ def build_search_url(surname, place_birth, page, mode):
         params["place_birth"] = place_birth
     return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
-# === Основной асинхронный парсер ===
+# === Основная функция парсинга ===
 async def fetch_heroes(surname, place_birth, max_pages, mode):
     global searching
     searching = True
@@ -83,8 +79,8 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
             ]
         )
         page = await browser.new_page()
-        no_result_count = 0
 
+        no_result_count = 0
         for current_page in range(1, max_pages + 1):
             if not searching:
                 break
@@ -108,21 +104,19 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
             for record in records:
                 try:
                     fullname = record.select_one(".card-person-title__name").text.strip().split()
-                    last_name, first_name, middle_name = (fullname + ["", ""])[:3]
+                    last_name, first_name, middle_name = (fullname + ["", ""])[0:3]
                     birth_year = record.select_one(".card-person-info__item--year .card-person-info__value")
                     birth_year = birth_year.text.strip() if birth_year else ""
-
                     place = record.select_one(".card-person-info__item--birthPlace .card-person-info__value")
                     place = place.text.strip() if place else ""
                     place = clean_text(place)
-
                     link = record.select_one(".card-person-title__name a")
                     url = "https://pamyat-naroda.ru" + link['href'] if link else ""
 
                     if mode == "surname":
                         if place_birth and place_birth.lower() not in place.lower():
                             continue
-                        region, district, settlement = (place.split(",") + ["", ""])[:3]
+                        region, district, settlement = (place.split(",") + ["", ""])[0:3]
                         chart_data["surname"]["regions"][region.strip()] = chart_data["surname"]["regions"].get(region.strip(), 0) + 1
                         chart_data["surname"]["districts"][district.strip()] = chart_data["surname"]["districts"].get(district.strip(), 0) + 1
                         chart_data["surname"]["settlements"][settlement.strip()] = chart_data["surname"]["settlements"].get(settlement.strip(), 0) + 1
@@ -145,11 +139,12 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
         await browser.close()
     searching = False
 
-# === Генераторы данных ===
+# === Асинхронный генератор результатов ===
 async def async_gen_rows(surname, place_birth, max_pages, mode):
     async for hero in fetch_heroes(surname, place_birth, max_pages, mode):
         yield hero
 
+# === Генератор Flask для отправки событий ===
 def generate_rows(surname, place_birth, max_pages, mode):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -203,6 +198,6 @@ def stop():
 def home():
     return 'OK'
 
-# === Локальный запуск (если нужен) ===
+# === Запуск через gunicorn ===
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=10000)
