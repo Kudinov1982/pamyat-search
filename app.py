@@ -1,3 +1,7 @@
+# Установка браузеров Playwright при старте приложения
+import subprocess
+subprocess.run(["playwright", "install", "chromium"], check=True)
+
 import asyncio
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -23,12 +27,12 @@ chart_data = {
     }
 }
 
-# === Функция очистки мусора ===
+# === Очистка мусорных фраз ===
 def clean_text(text):
     garbage_phrases = [
-        "Донесение о потерях", "Книга Памяти", "Данные об утрате документов", 
-        "Донесение о безвозвратных потерях", "данные ОБД", "данные картотеки", 
-        "Юбилейная картотека", "Донесения о потерях", "Картотека потерь", 
+        "Донесение о потерях", "Книга Памяти", "Данные об утрате документов",
+        "Донесение о безвозвратных потерях", "данные ОБД", "данные картотеки",
+        "Юбилейная картотека", "Донесения о потерях", "Картотека потерь",
         "Печатная Книга Памяти", "Уточнение потерь", "Картотека захоронений"
     ]
     for phrase in garbage_phrases:
@@ -36,7 +40,7 @@ def clean_text(text):
             return ''
     return text
 
-# === Генерация ссылок для поиска ===
+# === Генерация URL для поиска ===
 def build_search_url(surname, place_birth, page, mode):
     base = "https://pamyat-naroda.ru/heroes/"
     params = {
@@ -48,7 +52,7 @@ def build_search_url(surname, place_birth, page, mode):
             "kld_bolezn", "kld_card", "kld_upk", "kld_vmf", "kld_partizan",
             "potery_doneseniya_o_poteryah", "potery_gospitali", "potery_utochenie_poter",
             "potery_spiski_zahoroneniy", "potery_voennoplen", "potery_iskluchenie_iz_spiskov",
-            "potery_kartoteki", "potery_rvk_extra", "potery_isp_extra", 
+            "potery_kartoteki", "potery_rvk_extra", "potery_isp_extra",
             "same_doroga", "same_rvk", "same_guk", "potery_knigi_pamyati"
         ]),
         "page": page,
@@ -62,7 +66,7 @@ def build_search_url(surname, place_birth, page, mode):
         params["place_birth"] = place_birth
     return base + "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
-# === Основная функция парсинга ===
+# === Основной асинхронный парсер ===
 async def fetch_heroes(surname, place_birth, max_pages, mode):
     global searching
     searching = True
@@ -79,8 +83,8 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
             ]
         )
         page = await browser.new_page()
-
         no_result_count = 0
+
         for current_page in range(1, max_pages + 1):
             if not searching:
                 break
@@ -92,7 +96,7 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
             content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
             records = soup.select('.card-person')
-            
+
             if not records:
                 no_result_count += 1
                 if no_result_count >= 20:
@@ -136,17 +140,16 @@ async def fetch_heroes(surname, place_birth, max_pages, mode):
                 except Exception:
                     continue
 
-            yield f"page"
+            yield "page"
 
         await browser.close()
     searching = False
 
-# === Асинхронный генератор результатов ===
+# === Генераторы данных ===
 async def async_gen_rows(surname, place_birth, max_pages, mode):
     async for hero in fetch_heroes(surname, place_birth, max_pages, mode):
         yield hero
 
-# === Генератор Flask для отправки событий ===
 def generate_rows(surname, place_birth, max_pages, mode):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -170,7 +173,6 @@ def generate_rows(surname, place_birth, max_pages, mode):
             break
 
 # === Маршруты Flask ===
-
 @app.route('/stream')
 def stream():
     surname = request.args.get('surname', '').strip()
@@ -201,6 +203,6 @@ def stop():
 def home():
     return 'OK'
 
-# === Локальный запуск ===
+# === Локальный запуск (если нужен) ===
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=10000)
